@@ -194,6 +194,11 @@ denormalized source/configuration columns. Stored overlay JSON is checked
 against its row hash and manifest foreign key. Retrieval and idempotent-create
 paths fail closed on any mismatch.
 
+Manifest inserts allow either unique identity—the source key or content hash—to
+arbitrate an identical concurrent write, then mandatorily read back and validate
+both bindings. A hash collision without the requested source row is treated as
+an integrity failure rather than reused.
+
 ## Limitations and follow-ups
 
 - Commit and line units are configured proxies. They do not capture design,

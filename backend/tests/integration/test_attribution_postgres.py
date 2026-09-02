@@ -126,6 +126,58 @@ def test_postgres_manifest_row_bindings_guard_create_and_get(
     asyncio.run(scenario())
 
 
+def test_postgres_hash_conflict_without_source_row_fails_closed(
+    manifest_payload: dict,
+) -> None:
+    async def scenario() -> None:
+        from sqlalchemy import delete
+
+        from app.attribution.postgres import PostgresAttributionStore
+        from app.database import session_scope
+        from app.models.attribution import AttributionManifestRecord
+
+        payload = deepcopy(manifest_payload)
+        payload["project_identity"] = "integration/hash-conflict-binding"
+        payload["source_commit_sha"] = "6" * 40
+        manifest = build_manifest(CreateManifestRequest.model_validate(payload))
+        store = PostgresAttributionStore()
+
+        async with session_scope() as session:
+            await session.execute(
+                delete(AttributionManifestRecord).where(
+                    AttributionManifestRecord.manifest_content_hash
+                    == manifest.manifest_content_hash
+                )
+            )
+            session.add(
+                AttributionManifestRecord(
+                    manifest_content_hash=manifest.manifest_content_hash,
+                    source_key="0" * 64,
+                    project_identity=manifest.content.project_identity,
+                    source_repository_url=manifest.content.source_repository_url,
+                    source_commit_sha=manifest.content.source_commit_sha,
+                    algorithm_version=manifest.content.algorithm_version,
+                    configuration_fingerprint=manifest.content.configuration_fingerprint,
+                    manifest_json=manifest.model_dump(mode="json"),
+                )
+            )
+        try:
+            with pytest.raises(AttributionIntegrityError) as caught:
+                await store.create_or_get_manifest(manifest)
+
+            assert caught.value.code == "manifest_row_binding_error"
+        finally:
+            async with session_scope() as session:
+                await session.execute(
+                    delete(AttributionManifestRecord).where(
+                        AttributionManifestRecord.manifest_content_hash
+                        == manifest.manifest_content_hash
+                    )
+                )
+
+    asyncio.run(scenario())
+
+
 def test_postgres_overlay_row_binding_guards_create_and_get(
     manifest_payload: dict,
 ) -> None:

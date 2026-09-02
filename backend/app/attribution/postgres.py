@@ -100,7 +100,11 @@ class PostgresAttributionStore:
         statement = (
             insert(AttributionManifestRecord)
             .values(**values)
-            .on_conflict_do_nothing(index_elements=["source_key"])
+            # Both the source key and content hash are unique. PostgreSQL may
+            # observe either conflict first during identical concurrent writes,
+            # so let either constraint arbitrate and validate both identities
+            # explicitly during the mandatory read-back below.
+            .on_conflict_do_nothing()
             .returning(AttributionManifestRecord.manifest_content_hash)
         )
         async with session_scope() as session:
@@ -111,11 +115,35 @@ class PostgresAttributionStore:
                         AttributionManifestRecord.source_key == source_key
                     )
                 )
-            ).scalar_one()
-            stored_manifest = _manifest_from_record(
-                stored,
-                expected_source_key=source_key,
-            )
+            ).scalar_one_or_none()
+            if stored is None:
+                # An untargeted conflict that did not occupy the requested
+                # source key can only be a content-hash collision/corruption.
+                # Bind that row to both request identities before considering
+                # it safe; mismatches fail closed with a structured error.
+                stored = (
+                    await session.execute(
+                        select(AttributionManifestRecord).where(
+                            AttributionManifestRecord.manifest_content_hash
+                            == manifest.manifest_content_hash
+                        )
+                    )
+                ).scalar_one_or_none()
+                if stored is None:
+                    raise AttributionIntegrityError(
+                        "manifest_conflict_without_canonical_row",
+                        "manifest insert conflict has no canonical read-back row",
+                    )
+                stored_manifest = _manifest_from_record(
+                    stored,
+                    expected_manifest_hash=manifest.manifest_content_hash,
+                    expected_source_key=source_key,
+                )
+            else:
+                stored_manifest = _manifest_from_record(
+                    stored,
+                    expected_source_key=source_key,
+                )
             if inserted_hash is not None and inserted_hash != manifest.manifest_content_hash:
                 raise AttributionIntegrityError(
                     "manifest_row_binding_error",
