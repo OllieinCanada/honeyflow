@@ -1,0 +1,88 @@
+name: Attribution manifests
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/attribution-manifests.yml"
+      - "backend/**"
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/attribution-manifests.yml"
+      - "backend/**"
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: honeyflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d honeyflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/honeyflow_test
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/honeyflow_test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Check formatting
+        run: >-
+          python -m ruff format --check app/attribution app/schemas/attribution.py
+          app/routes/attribution.py app/models/attribution.py app/config.py app/main.py
+          app/models/__init__.py tests benchmarks
+          alembic/versions/20260221_0009_cover_image_to_db.py
+          alembic/versions/20260902_0010_attribution_manifests.py
+      - name: Lint attribution slice
+        run: >-
+          python -m ruff check app/attribution app/schemas/attribution.py
+          app/routes/attribution.py app/models/attribution.py app/config.py app/main.py
+          app/models/__init__.py tests benchmarks
+          alembic/versions/20260221_0009_cover_image_to_db.py
+          alembic/versions/20260902_0010_attribution_manifests.py
+      - name: Type-check attribution slice
+        run: >-
+          python -m mypy --follow-imports=silent
+          app/attribution app/schemas/attribution.py
+          app/routes/attribution.py app/models/attribution.py app/config.py app/main.py
+          app/models/__init__.py
+      - name: Migrate database
+        run: alembic upgrade head
+      - name: Test migration rollback
+        run: alembic downgrade 20260221_0009
+      - name: Reapply migration after rollback
+        run: alembic upgrade head
+      - name: Run unit and integration tests
+        run: python -m pytest
+      - name: Replay medium benchmark
+        run: >-
+          python -m benchmarks.attribution_medium
+          --verify tests/fixtures/attribution_medium_expected.json
+      - name: Compile application
+        run: python -m compileall -q app benchmarks tests
