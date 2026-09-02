@@ -1,5 +1,9 @@
 import { getBrokerContext } from "./broker";
-import { buildPrompt, type InferenceAction } from "./prompts";
+import {
+  buildPrompt,
+  promptTemplateId,
+  type InferenceAction,
+} from "./prompts";
 
 const MAX_RETRIES = 2;
 const GEMINI_MODEL = "gemini-2.5-flash";
@@ -13,10 +17,29 @@ interface ChatCompletion {
   choices: { message: { content: string } }[];
 }
 
+export interface InferenceProvenance {
+  action: InferenceAction;
+  provider: "0g" | "gemini";
+  model_id: string;
+  prompt_template_id: string;
+}
+
+interface InferenceTextResult {
+  content: string;
+  provider: "0g" | "gemini";
+  model: string;
+}
+
 /**
  * Call inference backend and return raw text.
  */
 export async function infer(prompt: string): Promise<string | null> {
+  return (await inferWithProvenance(prompt))?.content ?? null;
+}
+
+async function inferWithProvenance(
+  prompt: string
+): Promise<InferenceTextResult | null> {
   // Default to Gemini. 0G is opt-in via INFERENCE_PROVIDER=0g.
   if (INFERENCE_PROVIDER !== "0g") {
     return inferFallback(prompt);
@@ -28,7 +51,7 @@ export async function infer(prompt: string): Promise<string | null> {
   return inferFallback(prompt);
 }
 
-async function infer0G(prompt: string): Promise<string | null> {
+async function infer0G(prompt: string): Promise<InferenceTextResult | null> {
   let ctx;
   try {
     ctx = await getBrokerContext();
@@ -64,8 +87,7 @@ async function infer0G(prompt: string): Promise<string | null> {
       });
 
       if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`0G inference ${res.status}: ${body.slice(0, 200)}`);
+        throw new Error(`0G inference failed with status ${res.status}`);
       }
 
       const data: ChatCompletion = await res.json();
@@ -82,7 +104,7 @@ async function infer0G(prompt: string): Promise<string | null> {
         console.warn("[0G] processResponse warning:", e);
       }
 
-      return content;
+      return { content, provider: "0g", model: ctx.model };
     } catch (e) {
       lastErr = e;
       console.warn(`[0G] inference attempt ${attempt + 1} failed:`, e);
@@ -96,7 +118,7 @@ async function infer0G(prompt: string): Promise<string | null> {
   return null;
 }
 
-async function inferFallback(prompt: string): Promise<string | null> {
+async function inferFallback(prompt: string): Promise<InferenceTextResult | null> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
@@ -114,15 +136,14 @@ async function inferFallback(prompt: string): Promise<string | null> {
     });
 
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Gemini inference ${res.status}: ${body.slice(0, 200)}`);
+      throw new Error(`Gemini inference failed with status ${res.status}`);
     }
 
     const data = await res.json();
     const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
     console.log("[GEMINI] inference OK, response length:", content.length);
-    return content;
+    return { content, provider: "gemini", model: GEMINI_MODEL };
   } catch (e) {
     console.warn("[GEMINI] inference failed:", e);
     return null;
@@ -138,9 +159,29 @@ export async function inferAction(
   params: Record<string, any>
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
+  return (await inferActionWithProvenance(action, params)).result;
+}
+
+export async function inferActionWithProvenance(
+  action: InferenceAction,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  params: Record<string, any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<{ result: any; provenance: InferenceProvenance | null }> {
   const prompt = buildPrompt(action, params);
-  const raw = await infer(prompt);
-  return parseJsonResponse(raw);
+  const inferred = await inferWithProvenance(prompt);
+  const result = parseJsonResponse(inferred?.content ?? null);
+  return {
+    result,
+    provenance: inferred
+      ? {
+          action,
+          provider: inferred.provider,
+          model_id: inferred.model,
+          prompt_template_id: promptTemplateId(action),
+        }
+      : null,
+  };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -171,7 +212,7 @@ function parseJsonResponse(raw: string | null): any {
           /* fall through */
         }
       }
-      console.warn("[INFER] failed to parse JSON:", raw.slice(0, 300));
+      console.warn("[INFER] failed to parse model response as JSON");
       return null;
     }
   }

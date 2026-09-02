@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import load_only
 
+from app.config import settings
 from app.database import get_session, session_scope
 from app.models.edge_vote import EdgeVote
 from app.models.jury_prior import JuryPrior
@@ -1084,6 +1085,7 @@ async def submit_jury_answers(body: SubmitJuryAnswersRequest):
     reward_eth = 0.0
 
     touched_projects: Dict[int, Set[Tuple[str, str]]] = defaultdict(set)
+    accepted_votes: Dict[int, List[EdgeVote]] = defaultdict(list)
 
     async with session_scope() as session:
         project_cache: Dict[int, Optional[Project]] = {}
@@ -1106,18 +1108,18 @@ async def submit_jury_answers(body: SubmitJuryAnswersRequest):
             confidence = _clamp01(float(answer.confidence))
             human_weight = _clamp01(float(answer.human_percentage) / 100.0)
 
-            session.add(
-                EdgeVote(
-                    project_id=project.id,
-                    wallet_address=body.wallet_address.strip().lower(),
-                    edge_source=answer.edge_source,
-                    edge_target=answer.edge_target,
-                    ai_weight=ai_weight,
-                    human_weight=human_weight,
-                    confidence=confidence,
-                    question_type="edge",
-                )
+            vote = EdgeVote(
+                project_id=project.id,
+                wallet_address=body.wallet_address.strip().lower(),
+                edge_source=answer.edge_source,
+                edge_target=answer.edge_target,
+                ai_weight=ai_weight,
+                human_weight=human_weight,
+                confidence=confidence,
+                question_type="edge",
             )
+            session.add(vote)
+            accepted_votes[project.id].append(vote)
 
             accepted += 1
             reward_eth += 0.0001 * (0.5 + (confidence * 0.5))
@@ -1204,6 +1206,32 @@ async def submit_jury_answers(body: SubmitJuryAnswersRequest):
 
             node_by_id = _node_lookup(graph_data.get("nodes") or [])
             await _upsert_priors(session, grouped_votes, node_by_id)
+
+            if settings.provenance_enabled and accepted_votes[project_id]:
+                await session.flush()
+                try:
+                    from app.schemas.provenance import JuryEventV1
+                    from app.services.provenance_store import append_events_snapshot
+
+                    events = [
+                        JuryEventV1(
+                            sequence=1,
+                            event_id="edge-vote:{}".format(vote.id),
+                            edge_source=vote.edge_source,
+                            edge_target=vote.edge_target,
+                            prior_weight=float(vote.ai_weight),
+                            human_weight=float(vote.human_weight),
+                            confidence=float(vote.confidence),
+                        )
+                        for vote in accepted_votes[project_id]
+                    ]
+                    async with session.begin_nested():
+                        await append_events_snapshot(session, project_id, events)
+                except Exception as exc:
+                    logger.warning(
+                        "Provenance jury snapshot unavailable: error_type=%s",
+                        type(exc).__name__,
+                    )
 
     return SubmitJuryAnswersResponse(
         accepted=accepted,

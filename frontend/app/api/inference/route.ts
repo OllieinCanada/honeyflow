@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { inferAction } from "@/lib/0g";
+import { inferActionWithProvenance } from "@/lib/0g/inference";
 import type { InferenceAction } from "@/lib/0g";
 
 export const runtime = "nodejs";
@@ -34,7 +34,10 @@ export async function POST(req: Request) {
       );
     }
 
-    const result = await inferAction(action as InferenceAction, params);
+    const { result, provenance } = await inferActionWithProvenance(
+      action as InferenceAction,
+      params
+    );
 
     if (result === null) {
       return NextResponse.json(
@@ -43,7 +46,7 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json({ result });
+    return NextResponse.json({ result, provenance });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     console.error("[api/inference] error:", message);

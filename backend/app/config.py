@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # 0G inference API (Next.js API route)
     inference_api_url: str = "http://localhost:3000/api/inference"
 
+    # Sidecar provenance never changes attribution or payout inputs. Generation
+    # is opt-in because it adds bounded source-material requests.
+    provenance_enabled: bool = False
+
     graph: GraphDefaults = GraphDefaults()
     citation: CitationDefaults = CitationDefaults()
 

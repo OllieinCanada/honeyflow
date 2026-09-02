@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.database import get_session
 from app.models.jury_prior import JuryPrior
+from app.services.attribution_context import record_human_priors
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ async def load_priors(entity_type: Optional[str] = None) -> PriorMap:
             len(priors),
             entity_type or "all",
         )
+    record_human_priors(priors, entity_type)
     return priors
 
 

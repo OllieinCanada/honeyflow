@@ -45,7 +45,11 @@ async def _call_inference(action: str, params: Dict[str, Any], label: str = "") 
                     logger.warning("[LLM] Inference returned null (%s)", label)
                     return None
 
-                logger.info("[LLM] 0G %s OK: %s", label, str(result)[:200])
+                from app.services.attribution_context import stage_inference_metadata
+
+                stage_inference_metadata(action, data.get("provenance"))
+
+                logger.info("[LLM] 0G %s OK", label)
                 return result
         except Exception as exc:
             logger.warning("[LLM] Inference API call failed (%s): %s", label, exc)
@@ -84,6 +88,9 @@ async def analyze_repo(
     }, label="analyze_repo")
 
     if isinstance(result, dict) and "purpose" in result:
+        from app.services.attribution_context import record_contributing_inference
+
+        record_contributing_inference("analyze_repo")
         logger.info("[LLM] Repo analysis: purpose=%s, type=%s",
                     result.get("purpose", "")[:80], result.get("project_type"))
         return result
@@ -115,16 +122,19 @@ async def split_direct_vs_deps(
     }, label="direct_vs_deps")
 
     if isinstance(result, dict):
-        logger.info("[LLM] direct_vs_deps parsed: %s", result)
+        logger.info("[LLM] direct_vs_deps response parsed")
         direct = _extract_float(result, ("direct_fraction", "direct", "custom_code", "original_code"))
         deps = _extract_float(result, ("deps_fraction", "deps", "dependencies", "dependency_fraction"))
         if direct is not None and deps is not None:
             total = direct + deps
             if total > 0:
                 d, p = (direct / total, deps / total)
+                from app.services.attribution_context import record_contributing_inference
+
+                record_contributing_inference("split_direct_vs_deps")
                 logger.info("[LLM] Split -> direct=%.1f%% deps=%.1f%%", d * 100, p * 100)
                 return (d, p)
-        logger.warning("[LLM] Could not extract fractions from: %s", result)
+        logger.warning("[LLM] Could not extract valid inference fractions")
 
     if dep_count == 0:
         logger.info("[LLM] No deps -> direct=100%%")
@@ -162,6 +172,9 @@ async def rank_dependency_importance(
         logger.info("[LLM] No LLM dep scores, using usage frequency only")
         llm_scores = {}
     else:
+        from app.services.attribution_context import record_contributing_inference
+
+        record_contributing_inference("rank_dependency_importance")
         logger.info("[LLM] Got LLM dep scores for %d/%d deps", len(llm_scores), len(dep_names))
 
     max_freq = max(usage_freq.values()) if usage_freq else 1
@@ -212,6 +225,9 @@ async def analyze_package(
     }, label="analyze_package")
 
     if isinstance(result, dict) and "purpose" in result:
+        from app.services.attribution_context import record_contributing_inference
+
+        record_contributing_inference("analyze_package")
         logger.info("[LLM] Package analysis: purpose=%s, type=%s",
                     result.get("purpose", "")[:80], result.get("project_type"))
         return result
@@ -246,6 +262,9 @@ async def rank_citation_influence(
     }, label="citation_influence")
 
     if isinstance(result, dict):
+        from app.services.attribution_context import record_contributing_inference
+
+        record_contributing_inference("rank_citation_influence")
         logger.info("[LLM] Got influence scores for %d/%d citations",
                     len(result), len(citations))
         scores: Dict[str, float] = {}
@@ -298,6 +317,9 @@ async def analyze_paper(
     }, label="analyze_paper")
 
     if isinstance(result, dict) and "contribution" in result:
+        from app.services.attribution_context import record_contributing_inference
+
+        record_contributing_inference("analyze_paper")
         logger.info("[LLM] Paper analysis: %s", result.get("contribution", "")[:80])
         return result
 

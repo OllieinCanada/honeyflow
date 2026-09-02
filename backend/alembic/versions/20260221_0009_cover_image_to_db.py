@@ -15,11 +15,17 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "projects",
-        sa.Column("cover_image_data", sa.LargeBinary(), nullable=True),
-    )
+    # 0008 owns this column. This guard also repairs databases where the old,
+    # duplicate 0008 revision identifier marked the wrong operation applied.
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("projects")}
+    if "cover_image_data" not in columns:
+        op.add_column(
+            "projects",
+            sa.Column("cover_image_data", sa.LargeBinary(), nullable=True),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("projects", "cover_image_data")
+    # 0008 owns the column, so downgrading this compatibility repair is a no-op.
+    pass

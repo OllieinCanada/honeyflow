@@ -1,6 +1,7 @@
 """SSE streaming endpoint that runs a trace and streams log lines + graph data"""
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -14,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import defer
 
+from app.config import settings
 from app.database import session_scope
 from app.models.project import Project
 from app.services.citation_graph_builder import build_citation_graph
@@ -208,6 +210,73 @@ def _apply_payload(project: Project, result: dict, canonical_url: str) -> None:
     project.top_contributors = result["top_contributors"]
 
 
+async def _store_provenance_sidecar(session, project: Project, result: dict) -> None:
+    """Best-effort, default-off sidecar; never feeds back into attribution."""
+    payload = result.get("_provenance")
+    if not settings.provenance_enabled or not isinstance(payload, dict):
+        return
+    try:
+        from app.services.provenance import build_manifest, public_identity_decisions
+        from app.schemas.provenance import (
+            EvidenceReferenceV1,
+            HumanPriorInputV1,
+            InferenceEventV1,
+        )
+        from app.services.provenance_store import save_snapshot
+
+        lockfiles = payload["lockfiles"]
+        warnings = [
+            "mailmap_unavailable_for_remote_trace",
+            "path_classification_uses_honeyflow_heuristics",
+            "source_requests_guarded_but_not_ref_pinned",
+        ]
+        if not lockfiles:
+            warnings.append("no_lockfiles_observed")
+        if payload["paths_truncated"]:
+            warnings.append("path_inventory_truncated")
+        if payload["lockfiles_truncated"]:
+            warnings.append("lockfile_inventory_truncated")
+        warnings.extend(payload.get("capture_warnings", ()))
+        evidence = [
+            EvidenceReferenceV1(
+                reference_id="lockfile:{}".format(
+                    hashlib.sha256(path.encode("utf-8")).hexdigest()[:24]
+                ),
+                path=path,
+                change_kind="unknown",
+            )
+            for path in lockfiles
+        ]
+        manifest = build_manifest(
+            repository_url=result["source_url"],
+            source_commit_sha=payload["source_commit_sha"],
+            attribution=result["attribution"],
+            graph=result["graph_data"],
+            lockfile_digests=lockfiles,
+            attribution_config=payload["attribution_config"],
+            identities=public_identity_decisions(result["attribution"].keys()),
+            paths=payload["paths"],
+            evidence=evidence,
+            model=None,
+            inference_events=tuple(
+                InferenceEventV1.model_validate(item)
+                for item in payload["inference_events"]
+            ),
+            human_prior_inputs=tuple(
+                HumanPriorInputV1.model_validate(item)
+                for item in payload["human_prior_inputs"]
+            ),
+            warnings=warnings,
+        )
+        async with session.begin_nested():
+            await save_snapshot(session, project.id, manifest)
+        logger.info("Provenance snapshot stored: project_id=%d", project.id)
+    except Exception as exc:
+        # Attribution persistence remains the source of truth; do not leak the
+        # manifest payload or upstream response through logs.
+        logger.warning("Provenance snapshot unavailable: error_type=%s", type(exc).__name__)
+
+
 async def _upsert_project(session, result: dict, allow_create: bool) -> Project:
     trace_type = result["type"]
     canonical_url = _canonical_source_url(result["source_url"], trace_type)
@@ -307,6 +376,7 @@ async def _save_project(result: dict) -> dict:
             try:
                 async with session_scope() as session:
                     project = await _upsert_project(session, result, allow_create=True)
+                    await _store_provenance_sidecar(session, project, result)
                     # No refresh() — expire_on_commit=False keeps all attrs;
                     # INSERT gets id/timestamps via RETURNING; UPDATE path
                     # sets updated_at explicitly in _upsert_project
@@ -401,11 +471,53 @@ async def _run_trace(
 
     try:
         if trace_type == "repo":
-            graph, config, attribution = await build_contribution_graph(
-                url, max_depth=max_depth, max_children=max_children
-            )
+            materials = None
+            if settings.provenance_enabled:
+                try:
+                    from app.services.github import fetch_provenance_materials
+
+                    owner, repo = parse_repo_owner_and_name(url)
+                    materials = await fetch_provenance_materials(owner, repo)
+                except Exception as exc:
+                    logger.warning(
+                        "Provenance source material unavailable: error_type=%s",
+                        type(exc).__name__,
+                    )
+            attribution_capture = None
+            if settings.provenance_enabled:
+                from app.services.attribution_context import capture_attribution_inputs
+
+                with capture_attribution_inputs() as attribution_capture:
+                    graph, config, attribution = await build_contribution_graph(
+                        url,
+                        max_depth=max_depth,
+                        max_children=max_children,
+                    )
+            else:
+                graph, config, attribution = await build_contribution_graph(
+                    url, max_depth=max_depth, max_children=max_children
+                )
             graph_dict = graph.model_dump()
             name = _extract_name_from_url(url, trace_type)
+
+            if materials is not None:
+                try:
+                    from app.services.github import (
+                        fetch_repo_head_sha,
+                        require_public_repository,
+                    )
+
+                    owner, repo = parse_repo_owner_and_name(url)
+                    await require_public_repository(owner, repo)
+                    if await fetch_repo_head_sha(owner, repo) != materials[0]:
+                        logger.warning("Provenance source changed during trace; snapshot skipped")
+                        materials = None
+                except Exception as exc:
+                    logger.warning(
+                        "Provenance source recheck unavailable: error_type=%s",
+                        type(exc).__name__,
+                    )
+                    materials = None
 
             sorted_contribs = sorted(
                 attribution.items(), key=lambda x: x[1], reverse=True
@@ -423,7 +535,7 @@ async def _run_trace(
                 )
             )[:20]
 
-            return {
+            result = {
                 "name": name,
                 "category": "Infrastructure",
                 "type": "repo",
@@ -437,6 +549,28 @@ async def _run_trace(
                 "dependencies": deps,
                 "top_contributors": top_contributors,
             }
+            if materials is not None:
+                result["_provenance"] = {
+                    "source_commit_sha": materials[0],
+                    "lockfiles": materials[1],
+                    "paths": materials[2],
+                    "paths_truncated": materials[3],
+                    "lockfiles_truncated": materials[4],
+                    "attribution_config": {
+                        "effective_request": config.model_dump(mode="json"),
+                        "graph_settings": settings.graph.model_dump(mode="json"),
+                    },
+                    **(
+                        attribution_capture.snapshot()
+                        if attribution_capture is not None
+                        else {
+                            "inference_events": [],
+                            "human_prior_inputs": [],
+                            "capture_warnings": [],
+                        }
+                    ),
+                }
+            return result
 
         if trace_type == "paper":
             arxiv_id = _extract_arxiv_id(url)

@@ -15,6 +15,7 @@ from app.routes import (
     graph,
     jury,
     package_graph,
+    provenance,
     projects,
     stream,
     users,
@@ -82,6 +83,7 @@ def create_app() -> FastAPI:
     app.include_router(citation_graph.router)
     app.include_router(package_graph.router)
     app.include_router(projects.router)
+    app.include_router(provenance.router)
     app.include_router(jury.router)
     app.include_router(stream.router)
     app.include_router(users.router)

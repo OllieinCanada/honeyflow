@@ -191,6 +191,12 @@ export type InferenceAction =
   | "rank_citation_influence"
   | "analyze_paper";
 
+const PROMPT_TEMPLATE_VERSION = "honeyflow-attribution-prompts-v1";
+
+export function promptTemplateId(action: InferenceAction): string {
+  return `${PROMPT_TEMPLATE_VERSION}/${action}`;
+}
+
 export function buildPrompt(
   action: InferenceAction,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

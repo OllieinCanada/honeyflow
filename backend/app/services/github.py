@@ -5,6 +5,8 @@ and detailed contributor stats.
 """
 
 import asyncio
+import base64
+import hashlib
 import logging
 import re
 import time
@@ -205,6 +207,131 @@ async def fetch_repo_tree(owner: str, repo: str, branch: str = "HEAD") -> List[D
         "     %s/%s tree: %d entries (truncated=%s)", owner, repo, len(tree), truncated
     )
     return tree
+
+
+_LOCKFILE_NAMES = {
+    "bun.lock",
+    "bun.lockb",
+    "cargo.lock",
+    "composer.lock",
+    "gemfile.lock",
+    "go.sum",
+    "package-lock.json",
+    "pipfile.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "uv.lock",
+    "yarn.lock",
+}
+
+
+async def fetch_repo_head_sha(owner: str, repo: str) -> str:
+    """Resolve the current default-branch HEAD to an exact commit SHA."""
+    url = "{}/repos/{}/{}/commits/HEAD".format(settings.github_api_base, owner, repo)
+    async with _SEMAPHORE:
+        response = await _get_client().get(url, headers=_headers())
+        response.raise_for_status()
+    sha = response.json().get("sha")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("GitHub returned an invalid source commit SHA")
+    return sha
+
+
+async def require_public_repository(owner: str, repo: str) -> None:
+    """Fail closed unless GitHub currently identifies the repository as public."""
+    url = "{}/repos/{}/{}".format(settings.github_api_base, owner, repo)
+    async with _SEMAPHORE:
+        response = await _get_client().get(url, headers=_headers())
+        response.raise_for_status()
+    if response.json().get("private") is not False:
+        raise ValueError("public provenance export is disabled for non-public repositories")
+
+
+async def fetch_provenance_materials(
+    owner: str, repo: str
+) -> tuple[str, Dict[str, str], List[str], bool, bool]:
+    """Collect bounded lockfile SHA-256 digests at an exact public commit."""
+    base = settings.github_api_base
+    await require_public_repository(owner, repo)
+
+    sha = await fetch_repo_head_sha(owner, repo)
+    async with _SEMAPHORE:
+        tree_response = await _get_client().get(
+            "{}/repos/{}/{}/git/trees/{}".format(base, owner, repo, sha),
+            headers=_headers(),
+            params={"recursive": "1"},
+        )
+        tree_response.raise_for_status()
+    tree_data = tree_response.json()
+    if tree_data.get("truncated"):
+        raise ValueError("GitHub returned a truncated repository tree")
+    tree = tree_data.get("tree", [])
+    public_paths = sorted(
+        {
+            entry["path"]
+            for entry in tree
+            if isinstance(entry, dict)
+            and entry.get("type") == "blob"
+            and isinstance(entry.get("path"), str)
+            and 0 < len(entry["path"]) <= 512
+            and "\x00" not in entry["path"]
+        }
+    )
+    paths_truncated = len(public_paths) > 5_000
+    public_paths = public_paths[:5_000]
+    candidates = [
+        entry
+        for entry in tree
+        if isinstance(entry, dict)
+        and entry.get("type") == "blob"
+        and isinstance(entry.get("path"), str)
+        and entry["path"].split("/")[-1].casefold() in _LOCKFILE_NAMES
+        and isinstance(entry.get("size"), int)
+        and 0 <= entry["size"] <= 2_000_000
+        and isinstance(entry.get("sha"), str)
+    ]
+    candidates = sorted(candidates, key=lambda item: item["path"])
+    lockfiles_truncated = len(candidates) > 25
+    selected = []
+    selected_bytes = 0
+    for entry in candidates[:25]:
+        if selected_bytes + entry["size"] > 10_000_000:
+            lockfiles_truncated = True
+            break
+        selected.append(entry)
+        selected_bytes += entry["size"]
+    required_paths = {entry["path"] for entry in selected}
+    if not required_paths.issubset(public_paths):
+        other_paths = [path for path in public_paths if path not in required_paths]
+        public_paths = sorted(required_paths) + other_paths[: 5_000 - len(required_paths)]
+        public_paths = sorted(public_paths)
+
+    async def fetch_lockfile(entry: Dict[str, Any]) -> tuple[str, str]:
+        async with _SEMAPHORE:
+            blob_response = await _get_client().get(
+                "{}/repos/{}/{}/git/blobs/{}".format(base, owner, repo, entry["sha"]),
+                headers=_headers(),
+            )
+            blob_response.raise_for_status()
+        blob = blob_response.json()
+        if blob.get("encoding") != "base64" or not isinstance(blob.get("content"), str):
+            raise ValueError("GitHub returned an unsupported lockfile encoding")
+        encoded = re.sub(r"\s+", "", blob["content"])
+        content = base64.b64decode(encoded, validate=True)
+        if len(content) != entry["size"]:
+            raise ValueError("GitHub lockfile size changed during collection")
+        return entry["path"], hashlib.sha256(content).hexdigest()
+
+    lockfiles = await asyncio.gather(
+        *(fetch_lockfile(entry) for entry in selected)
+    )
+    return (
+        sha,
+        dict(lockfiles),
+        public_paths,
+        paths_truncated,
+        lockfiles_truncated,
+    )
 
 
 async def fetch_manifests_from_tree(
