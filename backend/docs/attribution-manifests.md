@@ -38,11 +38,13 @@ for their content hash, unique contributor adjustments, and zero-sum invariant.
 
 ## Identity and evidence rules
 
-- Verified GitHub logins and normalized email hashes are strong identity tokens.
-  Two weak display-name matches are never silently merged.
-- An email is normalized and SHA-256 hashed before it can enter manifest or
-  configuration content. The hash is pseudonymous, not anonymous; source email
-  data should still be access-controlled and minimized.
+- Normalized GitHub login tokens and normalized email hashes are strong identity
+  tokens within the caller-supplied evidence set. V1 does not verify control of
+  either identity; two weak display-name matches are never silently merged.
+- A value supplied through the email field is normalized and SHA-256 hashed
+  before it can enter manifest or configuration content. The hash is
+  pseudonymous, not anonymous; source email data should still be access-controlled
+  and minimized.
 - Explicit alias declarations require a login or email for every identity.
   The declared canonical identity is preferred, while ambiguous display names
   remain separate and are reported as potential-alias evidence.
@@ -173,8 +175,10 @@ PostgreSQL instance and also exercises upgrade, downgrade, and re-upgrade.
 - Commit and line units are configured proxies. They do not capture design,
   support, governance, or off-repository work unless evidence is deliberately
   added in a later version.
-- Email hashes can be guessed when the source address is known. V1 prevents raw
-  email disclosure but does not promise anonymity.
+- Email hashes can be guessed when the source address is known. V1 prevents the
+  identity email field itself from being emitted but does not promise anonymity.
+  Callers must separately minimize display names, repository paths, and other
+  evidence fields that could themselves contain sensitive text.
 - The source evidence collector and reviewer identity/audit log are adapter
   boundaries for follow-up work. The overlay's `review_reference` must point to
   the deployment's durable review record.
