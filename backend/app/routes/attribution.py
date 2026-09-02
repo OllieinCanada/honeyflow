@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.attribution.domain import AttributionDomainError
 from app.attribution.service import AttributionService
@@ -44,15 +45,16 @@ class AttributionValidationRoute(APIRoute):
             try:
                 return await original_handler(request)
             except RequestValidationError:
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        "detail": {
-                            "code": "invalid_attribution_request",
-                            "message": "attribution request validation failed",
-                        }
-                    },
-                )
+                return _invalid_request_response()
+            except StarletteHTTPException as error:
+                # FastAPI wraps body decoding failures (including invalid UTF-8)
+                # as an unstructured 400. Normalize only those unstructured
+                # attribution-route failures; preserve deliberate API errors.
+                if error.status_code != status.HTTP_400_BAD_REQUEST or isinstance(
+                    error.detail, dict
+                ):
+                    raise
+                return _invalid_request_response()
 
         return validation_handler
 
@@ -62,6 +64,18 @@ router = APIRouter(
     tags=["attribution"],
     route_class=AttributionValidationRoute,
 )
+
+
+def _invalid_request_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "code": "invalid_attribution_request",
+                "message": "attribution request validation failed",
+            }
+        },
+    )
 
 
 def get_attribution_service() -> AttributionService:

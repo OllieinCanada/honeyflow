@@ -292,6 +292,57 @@ def test_explicit_alias_can_link_eligible_identities_without_excluded_bridge(
     ] == ["github:alex-login"]
 
 
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [("display_name", "Zeta Nonwinning Alias"), ("is_bot", True)],
+)
+def test_all_normalized_alias_fields_are_committed_to_manifest_hash(
+    manifest_payload: dict,
+    field: str,
+    changed_value: str | bool,
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["aliases"] = [
+        {
+            "canonical": {
+                "display_name": "Alex Example",
+                "github_login": "alex-example",
+            },
+            "aliases": [
+                {
+                    "display_name": "Zulu Nonwinning Alias",
+                    "email": "alex@example.invalid",
+                }
+            ],
+        }
+    ]
+    original = build_manifest(CreateManifestRequest.model_validate(payload))
+    changed_payload = deepcopy(payload)
+    changed_payload["aliases"][0]["aliases"][0][field] = changed_value
+    changed = build_manifest(CreateManifestRequest.model_validate(changed_payload))
+
+    assert original.content.canonical_contributors == changed.content.canonical_contributors
+    assert original.content.evidence_records == changed.content.evidence_records
+    assert original.content.attribution_configuration == changed.content.attribution_configuration
+    assert original.content.input_evidence_fingerprint != changed.content.input_evidence_fingerprint
+    assert original.manifest_content_hash != changed.manifest_content_hash
+
+
+def test_repeated_weak_identity_name_within_record_is_rejected(
+    manifest_payload: dict,
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["records"][0]["coauthors"] = [
+        {"display_name": "Unverified Casey"},
+        {"display_name": "unverified casey"},
+    ]
+
+    with pytest.raises(AttributionDomainError) as caught:
+        build_manifest(CreateManifestRequest.model_validate(payload))
+
+    assert caught.value.code == "ambiguous_weak_identity"
+
+
 @pytest.mark.parametrize(("field", "changed_value"), [("additions", 11), ("deletions", 3)])
 def test_excluded_file_counts_are_committed_to_manifest_hash(
     manifest_payload: dict,

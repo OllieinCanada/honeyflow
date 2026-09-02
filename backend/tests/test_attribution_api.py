@@ -255,6 +255,44 @@ def test_malformed_json_uses_stable_validation_error(monkeypatch) -> None:
     assert response.json() == VALIDATION_ERROR
 
 
+def test_invalid_utf8_json_uses_stable_validation_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        settings,
+        "attribution_admin_token",
+        SecretStr("synthetic-test-token"),
+    )
+    with _client() as client:
+        response = client.post(
+            "/attribution/manifests",
+            headers={
+                "Content-Type": "application/json",
+                "X-Attribution-Admin-Token": "synthetic-test-token",
+            },
+            content=b'{"project_identity":"\xff"}',
+        )
+
+    assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
+
+
+def test_validation_error_normalization_is_scoped_to_attribution_routes() -> None:
+    app = FastAPI()
+
+    @app.post("/unrelated")
+    async def unrelated(payload: dict) -> dict:
+        return payload
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/unrelated",
+            headers={"Content-Type": "application/json"},
+            content=b'{"value":"\xff"}',
+        )
+
+    assert response.status_code == 400
+    assert response.json() != VALIDATION_ERROR
+
+
 def test_api_rejects_coerced_money_types(
     monkeypatch,
     manifest_payload: dict,

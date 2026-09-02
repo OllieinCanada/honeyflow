@@ -17,6 +17,7 @@ from app.attribution.store import (
     AttributionNotFoundError,
     InMemoryAttributionStore,
     ensure_overlay_integrity,
+    manifest_source_key,
     parse_manifest,
 )
 from app.schemas.attribution import CreateManifestRequest, CreateOverlayRequest
@@ -80,6 +81,42 @@ def test_changed_excluded_evidence_is_an_explicit_source_conflict(
         with pytest.raises(AttributionConflictError) as caught:
             await store.create_or_get_manifest(conflicting)
 
+        assert first.manifest_content_hash != conflicting.manifest_content_hash
+        assert caught.value.code == "manifest_source_conflict"
+
+    asyncio.run(scenario())
+
+
+def test_changed_nonwinning_alias_metadata_is_an_explicit_source_conflict(
+    manifest_payload: dict,
+) -> None:
+    async def scenario() -> None:
+        store = InMemoryAttributionStore()
+        payload = deepcopy(manifest_payload)
+        payload["aliases"] = [
+            {
+                "canonical": {
+                    "display_name": "Alex Example",
+                    "github_login": "alex-example",
+                },
+                "aliases": [
+                    {
+                        "display_name": "Zulu Nonwinning Alias",
+                        "email": "alex@example.invalid",
+                    }
+                ],
+            }
+        ]
+        first = build_manifest(CreateManifestRequest.model_validate(payload))
+        changed_payload = deepcopy(payload)
+        changed_payload["aliases"][0]["aliases"][0]["display_name"] = "Zeta Nonwinning Alias"
+        conflicting = build_manifest(CreateManifestRequest.model_validate(changed_payload))
+        await store.create_or_get_manifest(first)
+
+        with pytest.raises(AttributionConflictError) as caught:
+            await store.create_or_get_manifest(conflicting)
+
+        assert manifest_source_key(first) == manifest_source_key(conflicting)
         assert first.manifest_content_hash != conflicting.manifest_content_hash
         assert caught.value.code == "manifest_source_conflict"
 

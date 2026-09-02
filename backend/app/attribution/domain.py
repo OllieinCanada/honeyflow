@@ -327,7 +327,7 @@ def _identity_commitment_payload(identity: IdentityInput) -> dict[str, object]:
 
 
 def _input_evidence_fingerprint(request: CreateManifestRequest) -> str:
-    """Commit to every normalized record field, including excluded evidence."""
+    """Commit to normalized record and alias fields, including excluded evidence."""
     records: list[dict[str, object]] = []
     for record in sorted(
         request.records,
@@ -353,7 +353,24 @@ def _input_evidence_fingerprint(request: CreateManifestRequest) -> str:
                 "is_merge": record.is_merge,
             }
         )
-    return content_hash({"records": records})
+    commitment: dict[str, object] = {"records": records}
+    if request.aliases:
+        aliases: list[dict[str, object]] = []
+        for declaration in request.aliases:
+            aliases.append(
+                {
+                    "canonical": _identity_commitment_payload(declaration.canonical),
+                    "aliases": sorted(
+                        (
+                            _identity_commitment_payload(identity)
+                            for identity in declaration.aliases
+                        ),
+                        key=canonical_json_bytes,
+                    ),
+                }
+            )
+        commitment["aliases"] = sorted(aliases, key=canonical_json_bytes)
+    return content_hash(commitment)
 
 
 def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
@@ -507,6 +524,19 @@ def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
                     role_context="coauthor:{}".format(context_digest),
                 )
             )
+
+        weak_display_names: set[str] = set()
+        for identity_draft in identities:
+            identity = identity_draft.identity
+            if _strong_tokens(identity):
+                continue
+            normalized_display_name = identity.display_name.casefold()
+            if normalized_display_name in weak_display_names:
+                raise AttributionDomainError(
+                    "ambiguous_weak_identity",
+                    "a record contains repeated unverified identity names",
+                )
+            weak_display_names.add(normalized_display_name)
 
         if not identities:
             if record.author is not None:

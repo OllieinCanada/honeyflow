@@ -32,11 +32,13 @@ Evaluation timestamps are excluded: logically identical evidence produces the
 same bytes and hash regardless of wall-clock time.
 
 `input_evidence_fingerprint` commits to every normalized contribution-record
-field before eligibility rules are applied, including additions, deletions, and
-binary markers for excluded files. Email fields enter that commitment only as
-normalized hashes. Thus a changed excluded input changes the manifest hash and
-conflicts with an already stored manifest for the same source/configuration,
-even when its scored evidence and weights would otherwise be identical.
+field before eligibility rules are applied and every explicit-alias identity
+field. This includes additions, deletions, binary markers for excluded files,
+and non-token alias metadata such as display name and bot marker. Email fields
+enter that commitment only as normalized hashes. Thus changed excluded evidence
+or alias metadata changes the manifest hash and conflicts with an already stored
+manifest for the same source/configuration, even when scored evidence and
+weights would otherwise be identical.
 
 Before use, stored manifests are revalidated against their schema, outer
 content hash, configuration fingerprint, exact weight total, evidence hashes,
@@ -59,7 +61,11 @@ for their content hash, unique contributor adjustments, and zero-sum invariant.
 - Automatic identity linking is built only after record, file, duplicate, and
   bot eligibility is resolved. An excluded identity cannot bridge two eligible
   contributors. Explicit alias declarations remain a separate trusted input and
-  are committed in the attribution configuration.
+  their strong-token rules are committed in the attribution configuration;
+  every alias identity field is also covered by the input evidence fingerprint.
+- Repeated weak identities with case-insensitively equal display names in one
+  record are rejected as ambiguous. Callers must supply a stable login/email or
+  remove the duplicate rather than silently changing that record's unit split.
 - Included file evidence records additions, deletions, and the configured capped
   line count used by the scorer. Evidence has a stable reason code when a file
   change exceeds that cap, so the manifest can explain its aggregate.
@@ -112,7 +118,8 @@ Representative request:
 
 Strict Pydantic schemas reject unknown fields, invalid object IDs, absolute or
 parent-relative paths, negative line counts, malformed overlays, and noninteger
-money/weight values. Attribution request and path validation returns
+money/weight values. Validation failures in attribution request bodies and
+paths—including malformed JSON and invalid UTF-8—return
 `detail.code = "invalid_attribution_request"` and a stable human-readable
 `detail.message`; domain, storage, authentication, and not-found errors use the
 same `detail.code`/`detail.message` envelope with their specific codes.
