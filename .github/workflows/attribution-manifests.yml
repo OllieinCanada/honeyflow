@@ -6,7 +6,6 @@ on:
       - ".github/workflows/attribution-manifests.yml"
       - "backend/**"
   push:
-    branches: [master]
     paths:
       - ".github/workflows/attribution-manifests.yml"
       - "backend/**"
