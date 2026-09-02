@@ -31,6 +31,13 @@ canonical form, not a general claim of JSON Canonicalization Scheme support.
 Evaluation timestamps are excluded: logically identical evidence produces the
 same bytes and hash regardless of wall-clock time.
 
+`input_evidence_fingerprint` commits to every normalized contribution-record
+field before eligibility rules are applied, including additions, deletions, and
+binary markers for excluded files. Email fields enter that commitment only as
+normalized hashes. Thus a changed excluded input changes the manifest hash and
+conflicts with an already stored manifest for the same source/configuration,
+even when its scored evidence and weights would otherwise be identical.
+
 Before use, stored manifests are revalidated against their schema, outer
 content hash, configuration fingerprint, exact weight total, evidence hashes,
 and contributor-to-evidence references. Stored overlays are likewise checked
@@ -49,6 +56,10 @@ for their content hash, unique contributor adjustments, and zero-sum invariant.
   The declared canonical identity is preferred, while ambiguous display names
   remain separate and are reported as potential-alias evidence.
 - Co-authors share a commit's configured integer units exactly.
+- Automatic identity linking is built only after record, file, duplicate, and
+  bot eligibility is resolved. An excluded identity cannot bridge two eligible
+  contributors. Explicit alias declarations remain a separate trusted input and
+  are committed in the attribution configuration.
 - Included file evidence records additions, deletions, and the configured capped
   line count used by the scorer. Evidence has a stable reason code when a file
   change exceeds that cap, so the manifest can explain its aggregate.
@@ -101,8 +112,10 @@ Representative request:
 
 Strict Pydantic schemas reject unknown fields, invalid object IDs, absolute or
 parent-relative paths, negative line counts, malformed overlays, and noninteger
-money/weight values. API errors contain stable `code` and human-readable
-`message` fields.
+money/weight values. Attribution request and path validation returns
+`detail.code = "invalid_attribution_request"` and a stable human-readable
+`detail.message`; domain, storage, authentication, and not-found errors use the
+same `detail.code`/`detail.message` envelope with their specific codes.
 
 ## Payout-preview semantics
 
@@ -169,6 +182,10 @@ synthetic evidence and needs no GitHub, model, wallet, or payment API.
 Set `TEST_DATABASE_URL` (and the same value as `DATABASE_URL`) to enable the
 PostgreSQL concurrent-write integration test. CI provisions an ephemeral
 PostgreSQL instance and also exercises upgrade, downgrade, and re-upgrade.
+Stored manifest JSON is checked against its row hash, source key, and
+denormalized source/configuration columns. Stored overlay JSON is checked
+against its row hash and manifest foreign key. Retrieval and idempotent-create
+paths fail closed on any mismatch.
 
 ## Limitations and follow-ups
 

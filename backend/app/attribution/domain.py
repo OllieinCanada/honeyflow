@@ -94,13 +94,33 @@ class _Profile:
         return sorted(self.display_names, key=lambda value: (value.casefold(), value))[0]
 
 
+@dataclass(frozen=True)
+class _EligibleIdentityDraft:
+    identity: IdentityInput
+    evidence_reason: EvidenceReason
+    role_context: str
+
+
+@dataclass(frozen=True)
+class _EligibleRecordDraft:
+    input_record_id: str
+    commit_sha: str
+    included_files: tuple[FileEvidence, ...]
+    file_change_capped: bool
+    record_units: int
+    identities: tuple[_EligibleIdentityDraft, ...]
+
+
 class _IdentityIndex:
-    def __init__(self, request: CreateManifestRequest):
-        identities: list[IdentityInput] = []
-        for record in request.records:
-            if record.author:
-                identities.append(record.author)
-            identities.extend(record.coauthors)
+    def __init__(
+        self,
+        request: CreateManifestRequest,
+        automatic_identities: Iterable[IdentityInput],
+    ):
+        # Only identities that survived record/file/bot eligibility may create
+        # automatic links. Explicit alias declarations are a separate trusted
+        # input and remain available even when one alias has no eligible record.
+        identities = list(automatic_identities)
         for declaration in request.aliases:
             identities.append(declaration.canonical)
             identities.extend(declaration.aliases)
@@ -296,6 +316,46 @@ def _canonical_dependencies(
     return [unique[key] for key in sorted(unique)]
 
 
+def _identity_commitment_payload(identity: IdentityInput) -> dict[str, object]:
+    """Normalize an identity for input commitment without emitting raw email."""
+    return {
+        "display_name": identity.display_name,
+        "github_login": identity.github_login.casefold() if identity.github_login else None,
+        "email_token": _email_token(identity.email) if identity.email else None,
+        "is_bot": identity.is_bot,
+    }
+
+
+def _input_evidence_fingerprint(request: CreateManifestRequest) -> str:
+    """Commit to every normalized record field, including excluded evidence."""
+    records: list[dict[str, object]] = []
+    for record in sorted(
+        request.records,
+        key=lambda item: (item.commit_sha.lower(), item.record_id),
+    ):
+        coauthors = [_identity_commitment_payload(identity) for identity in record.coauthors]
+        files = [
+            {
+                "path": file_record.path,
+                "additions": file_record.additions,
+                "deletions": file_record.deletions,
+                "binary": file_record.binary,
+            }
+            for file_record in record.files
+        ]
+        records.append(
+            {
+                "record_id": record.record_id,
+                "commit_sha": record.commit_sha.lower(),
+                "author": (_identity_commitment_payload(record.author) if record.author else None),
+                "coauthors": sorted(coauthors, key=canonical_json_bytes),
+                "files": sorted(files, key=canonical_json_bytes),
+                "is_merge": record.is_merge,
+            }
+        )
+    return content_hash({"records": records})
+
+
 def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
     record_ids = [record.record_id for record in request.records]
     if len(record_ids) != len(set(record_ids)):
@@ -308,12 +368,10 @@ def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
                 "record {} contains the same file path more than once".format(record.record_id),
             )
 
-    identity_index = _IdentityIndex(request)
     configured_bots = set(request.rules.bot_logins)
-    raw_weights: dict[str, int] = defaultdict(int)
-    evidence_drafts: list[dict] = []
     exclusions: list[ExclusionRecord] = []
     seen_commits: set[str] = set()
+    eligible_records: list[_EligibleRecordDraft] = []
 
     records = sorted(
         request.records,
@@ -401,7 +459,7 @@ def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
             )
             continue
 
-        identities: list[tuple[IdentityInput, EvidenceReason, str]] = []
+        identities: list[_EligibleIdentityDraft] = []
         if record.author is None:
             exclusions.append(
                 ExclusionRecord(
@@ -411,40 +469,46 @@ def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
                     explanation="The record does not contain a primary author identity.",
                 )
             )
-        else:
-            identities.append((record.author, EvidenceReason.PRIMARY_AUTHOR, "author"))
-        for coauthor in sorted(record.coauthors, key=_identity_sort_key):
-            context_digest = hashlib.sha256(
-                "|".join(_identity_sort_key(coauthor)).encode("utf-8")
-            ).hexdigest()
-            identities.append(
-                (coauthor, EvidenceReason.COAUTHOR, "coauthor:{}".format(context_digest))
+        elif request.rules.exclude_bots and _is_bot(record.author, configured_bots):
+            exclusions.append(
+                ExclusionRecord(
+                    input_record_id=record.record_id,
+                    reference=record.author.github_login or record.author.display_name,
+                    reason_code=ExclusionReason.BOT_IDENTITY,
+                    explanation="The identity matches a configured bot rule.",
+                )
             )
-
-        resolved: dict[str, tuple[_Profile, set[EvidenceReason]]] = {}
-        for identity, evidence_reason, role_context in identities:
-            if request.rules.exclude_bots and _is_bot(identity, configured_bots):
+        else:
+            identities.append(
+                _EligibleIdentityDraft(
+                    identity=record.author,
+                    evidence_reason=EvidenceReason.PRIMARY_AUTHOR,
+                    role_context="author",
+                )
+            )
+        for coauthor in sorted(record.coauthors, key=_identity_sort_key):
+            if request.rules.exclude_bots and _is_bot(coauthor, configured_bots):
                 exclusions.append(
                     ExclusionRecord(
                         input_record_id=record.record_id,
-                        reference=identity.github_login or identity.display_name,
+                        reference=coauthor.github_login or coauthor.display_name,
                         reason_code=ExclusionReason.BOT_IDENTITY,
                         explanation="The identity matches a configured bot rule.",
                     )
                 )
                 continue
-            contributor_id, profile = identity_index.resolve(
-                identity,
-                context="{}:{}:{}".format(commit_sha, record.record_id, role_context),
+            context_digest = hashlib.sha256(
+                "|".join(_identity_sort_key(coauthor)).encode("utf-8")
+            ).hexdigest()
+            identities.append(
+                _EligibleIdentityDraft(
+                    identity=coauthor,
+                    evidence_reason=EvidenceReason.COAUTHOR,
+                    role_context="coauthor:{}".format(context_digest),
+                )
             )
-            reason_codes = resolved.setdefault(contributor_id, (profile, set()))[1]
-            reason_codes.add(evidence_reason)
-            if profile.explicit_alias:
-                reason_codes.add(EvidenceReason.EXPLICIT_ALIAS)
-            if file_change_capped:
-                reason_codes.add(EvidenceReason.FILE_CHANGE_CAPPED)
 
-        if not resolved:
+        if not identities:
             if record.author is not None:
                 exclusions.append(
                     ExclusionRecord(
@@ -469,8 +533,46 @@ def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
                 )
             )
             continue
+        eligible_records.append(
+            _EligibleRecordDraft(
+                input_record_id=record.record_id,
+                commit_sha=commit_sha,
+                included_files=tuple(included_files),
+                file_change_capped=file_change_capped,
+                record_units=record_units,
+                identities=tuple(identities),
+            )
+        )
+
+    # Identity linking is intentionally a second pass. An identity from an
+    # excluded record (or an excluded bot inside an otherwise eligible record)
+    # must not bridge two contributors that actually receive weight.
+    identity_index = _IdentityIndex(
+        request,
+        (identity.identity for record in eligible_records for identity in record.identities),
+    )
+    raw_weights: dict[str, int] = defaultdict(int)
+    evidence_drafts: list[dict] = []
+    for eligible_record in eligible_records:
+        resolved: dict[str, tuple[_Profile, set[EvidenceReason]]] = {}
+        for identity_draft in eligible_record.identities:
+            contributor_id, profile = identity_index.resolve(
+                identity_draft.identity,
+                context="{}:{}:{}".format(
+                    eligible_record.commit_sha,
+                    eligible_record.input_record_id,
+                    identity_draft.role_context,
+                ),
+            )
+            reason_codes = resolved.setdefault(contributor_id, (profile, set()))[1]
+            reason_codes.add(identity_draft.evidence_reason)
+            if profile.explicit_alias:
+                reason_codes.add(EvidenceReason.EXPLICIT_ALIAS)
+            if eligible_record.file_change_capped:
+                reason_codes.add(EvidenceReason.FILE_CHANGE_CAPPED)
+
         shares = allocate_integer_units(
-            record_units,
+            eligible_record.record_units,
             {contributor_id: 1 for contributor_id in resolved},
         )
         for contributor_id in sorted(resolved):
@@ -480,10 +582,10 @@ def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
             evidence_drafts.append(
                 {
                     "contributor_id": contributor_id,
-                    "input_record_id": record.record_id,
-                    "commit_sha": commit_sha,
+                    "input_record_id": eligible_record.input_record_id,
+                    "commit_sha": eligible_record.commit_sha,
                     "raw_units": share,
-                    "included_files": included_files,
+                    "included_files": list(eligible_record.included_files),
                     "reason_codes": set(reason_codes),
                     "profile": profile,
                 }
@@ -576,6 +678,7 @@ def build_manifest(request: CreateManifestRequest) -> AttributionManifest:
             "record:{}@{}".format(record.record_id, record.commit_sha.lower())
             for record in sorted(request.records, key=lambda item: item.record_id)
         ],
+        input_evidence_fingerprint=_input_evidence_fingerprint(request),
         attribution_configuration=attribution_configuration,
         configuration_fingerprint=content_hash(attribution_configuration),
         canonical_contributors=contributors,

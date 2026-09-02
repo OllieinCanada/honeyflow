@@ -110,7 +110,7 @@ def test_raw_email_is_not_exposed_in_manifest(manifest_request) -> None:
     serialized = json.dumps(manifest.model_dump(mode="json"), sort_keys=True)
 
     assert "alex@example.invalid" not in serialized
-    assert "email-sha256:" not in serialized  # the verified GitHub login is canonical
+    assert "email-sha256:" not in serialized  # the supplied GitHub login is canonical
 
 
 def test_applied_configuration_is_replayable_and_matches_fingerprint(
@@ -177,6 +177,149 @@ def test_generated_vendored_binary_bot_merge_and_duplicate_are_explained(
         ExclusionReason.MERGE_COMMIT,
         ExclusionReason.VENDORED_FILE,
     } <= reasons
+
+
+@pytest.mark.parametrize(
+    ("bridge_kind", "expected_reason"),
+    [
+        ("merge", ExclusionReason.MERGE_COMMIT),
+        ("duplicate", ExclusionReason.DUPLICATE_COMMIT),
+        ("bot", ExclusionReason.BOT_IDENTITY),
+        ("no_eligible_files", ExclusionReason.NO_ELIGIBLE_FILES),
+        ("zero_weight", ExclusionReason.ZERO_WEIGHT_RECORD),
+    ],
+)
+def test_excluded_identity_cannot_bridge_eligible_contributors(
+    manifest_payload: dict,
+    bridge_kind: str,
+    expected_reason: ExclusionReason,
+) -> None:
+    payload = deepcopy(manifest_payload)
+    alice_commit = "1" * 40
+    bridge = {
+        "record_id": "zz-excluded-bridge",
+        "commit_sha": "3" * 40,
+        "author": {
+            "display_name": "Excluded Bridge",
+            "github_login": "eligible-alice",
+            "email": "eligible-bob@example.invalid",
+        },
+        "files": [{"path": "src/bridge.py", "additions": 1}],
+    }
+    if bridge_kind == "merge":
+        bridge["is_merge"] = True
+    elif bridge_kind == "duplicate":
+        bridge["commit_sha"] = alice_commit
+    elif bridge_kind == "bot":
+        bridge["author"]["is_bot"] = True
+    elif bridge_kind == "no_eligible_files":
+        bridge["files"] = [{"path": "vendor/bridge.py", "additions": 1}]
+    else:
+        payload["rules"] = {"commit_base_units": 0, "line_unit": 1}
+        bridge["files"] = [{"path": "src/bridge.py", "additions": 0}]
+
+    payload["records"] = [
+        {
+            "record_id": "eligible-alice",
+            "commit_sha": alice_commit,
+            "author": {
+                "display_name": "Eligible Alice",
+                "github_login": "eligible-alice",
+            },
+            "files": [{"path": "src/alice.py", "additions": 1}],
+        },
+        {
+            "record_id": "eligible-bob",
+            "commit_sha": "2" * 40,
+            "author": {
+                "display_name": "Eligible Bob",
+                "email": "eligible-bob@example.invalid",
+            },
+            "files": [{"path": "src/bob.py", "additions": 1}],
+        },
+        bridge,
+    ]
+
+    manifest = build_manifest(CreateManifestRequest.model_validate(payload))
+    contributor_ids = {
+        contributor.contributor_id for contributor in manifest.content.canonical_contributors
+    }
+
+    assert contributor_ids == {
+        "github:eligible-alice",
+        "email-sha256:" + hashlib.sha256(b"eligible-bob@example.invalid").hexdigest(),
+    }
+    assert expected_reason in {exclusion.reason_code for exclusion in manifest.content.exclusions}
+
+
+def test_explicit_alias_can_link_eligible_identities_without_excluded_bridge(
+    manifest_payload: dict,
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["records"] = [
+        {
+            "record_id": "eligible-login",
+            "commit_sha": "1" * 40,
+            "author": {"display_name": "Alex", "github_login": "alex-login"},
+            "files": [{"path": "src/login.py", "additions": 1}],
+        },
+        {
+            "record_id": "eligible-email",
+            "commit_sha": "2" * 40,
+            "author": {
+                "display_name": "Alex",
+                "email": "alex-alias@example.invalid",
+            },
+            "files": [{"path": "src/email.py", "additions": 1}],
+        },
+    ]
+    payload["aliases"] = [
+        {
+            "canonical": {"display_name": "Alex", "github_login": "alex-login"},
+            "aliases": [
+                {
+                    "display_name": "Alex",
+                    "email": "alex-alias@example.invalid",
+                }
+            ],
+        }
+    ]
+
+    manifest = build_manifest(CreateManifestRequest.model_validate(payload))
+
+    assert [
+        contributor.contributor_id for contributor in manifest.content.canonical_contributors
+    ] == ["github:alex-login"]
+
+
+@pytest.mark.parametrize(("field", "changed_value"), [("additions", 11), ("deletions", 3)])
+def test_excluded_file_counts_are_committed_to_manifest_hash(
+    manifest_payload: dict,
+    field: str,
+    changed_value: int,
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["records"].append(
+        {
+            "record_id": "excluded-vendor-only",
+            "commit_sha": "1" * 40,
+            "author": {
+                "display_name": "Excluded Vendor Fixture",
+                "github_login": "excluded-vendor-fixture",
+            },
+            "files": [{"path": "vendor/dependency.py", "additions": 10, "deletions": 2}],
+        }
+    )
+    original = build_manifest(CreateManifestRequest.model_validate(payload))
+    changed_payload = deepcopy(payload)
+    changed_payload["records"][-1]["files"][0][field] = changed_value
+    changed = build_manifest(CreateManifestRequest.model_validate(changed_payload))
+
+    assert original.content.canonical_contributors == changed.content.canonical_contributors
+    assert original.content.evidence_records == changed.content.evidence_records
+    assert original.content.exclusions == changed.content.exclusions
+    assert original.content.input_evidence_fingerprint != changed.content.input_evidence_fingerprint
+    assert original.manifest_content_hash != changed.manifest_content_hash
 
 
 def test_same_display_name_is_not_silently_merged(manifest_payload: dict) -> None:

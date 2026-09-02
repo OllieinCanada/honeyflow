@@ -13,6 +13,13 @@ from app.attribution.store import InMemoryAttributionStore
 from app.config import settings
 from app.routes import attribution
 
+VALIDATION_ERROR = {
+    "detail": {
+        "code": "invalid_attribution_request",
+        "message": "attribution request validation failed",
+    }
+}
+
 
 def _client() -> TestClient:
     app = FastAPI()
@@ -209,6 +216,43 @@ def test_api_rejects_unknown_request_fields(
         )
 
     assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
+
+
+def test_invalid_path_hash_uses_stable_validation_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        settings,
+        "attribution_admin_token",
+        SecretStr("synthetic-test-token"),
+    )
+    with _client() as client:
+        response = client.get(
+            "/attribution/manifests/not-a-sha256-hash",
+            headers={"X-Attribution-Admin-Token": "synthetic-test-token"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
+
+
+def test_malformed_json_uses_stable_validation_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        settings,
+        "attribution_admin_token",
+        SecretStr("synthetic-test-token"),
+    )
+    with _client() as client:
+        response = client.post(
+            "/attribution/manifests",
+            headers={
+                "Content-Type": "application/json",
+                "X-Attribution-Admin-Token": "synthetic-test-token",
+            },
+            content=b'{"project_identity":',
+        )
+
+    assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
 
 
 def test_api_rejects_coerced_money_types(
@@ -235,6 +279,7 @@ def test_api_rejects_coerced_money_types(
         )
 
     assert response.status_code == 422
+    assert response.json() == VALIDATION_ERROR
 
 
 def test_read_api_requires_admin_token(monkeypatch) -> None:

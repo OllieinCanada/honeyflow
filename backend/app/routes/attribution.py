@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import hmac
-from typing import Annotated, NoReturn
+from collections.abc import Callable, Coroutine
+from typing import Annotated, Any, NoReturn
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 from app.attribution.domain import AttributionDomainError
 from app.attribution.service import AttributionService
@@ -27,7 +31,37 @@ from app.schemas.attribution import (
     StoredOverlayResponse,
 )
 
-router = APIRouter(prefix="/attribution", tags=["attribution"])
+
+class AttributionValidationRoute(APIRoute):
+    """Give this API a stable, non-disclosing validation error envelope."""
+
+    def get_route_handler(
+        self,
+    ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        original_handler = super().get_route_handler()
+
+        async def validation_handler(request: Request) -> Response:
+            try:
+                return await original_handler(request)
+            except RequestValidationError:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": {
+                            "code": "invalid_attribution_request",
+                            "message": "attribution request validation failed",
+                        }
+                    },
+                )
+
+        return validation_handler
+
+
+router = APIRouter(
+    prefix="/attribution",
+    tags=["attribution"],
+    route_class=AttributionValidationRoute,
+)
 
 
 def get_attribution_service() -> AttributionService:

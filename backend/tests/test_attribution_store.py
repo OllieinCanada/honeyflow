@@ -54,6 +54,38 @@ def test_changed_evidence_for_same_source_key_is_an_explicit_conflict(
     asyncio.run(scenario())
 
 
+def test_changed_excluded_evidence_is_an_explicit_source_conflict(
+    manifest_payload: dict,
+) -> None:
+    async def scenario() -> None:
+        store = InMemoryAttributionStore()
+        payload = deepcopy(manifest_payload)
+        payload["records"].append(
+            {
+                "record_id": "excluded-input-commitment",
+                "commit_sha": "1" * 40,
+                "author": {
+                    "display_name": "Excluded Fixture",
+                    "github_login": "excluded-fixture",
+                },
+                "files": [{"path": "vendor/input.py", "additions": 10}],
+            }
+        )
+        first = build_manifest(CreateManifestRequest.model_validate(payload))
+        changed_payload = deepcopy(payload)
+        changed_payload["records"][-1]["files"][0]["additions"] = 11
+        conflicting = build_manifest(CreateManifestRequest.model_validate(changed_payload))
+        await store.create_or_get_manifest(first)
+
+        with pytest.raises(AttributionConflictError) as caught:
+            await store.create_or_get_manifest(conflicting)
+
+        assert first.manifest_content_hash != conflicting.manifest_content_hash
+        assert caught.value.code == "manifest_source_conflict"
+
+    asyncio.run(scenario())
+
+
 def test_store_returns_defensive_copies(manifest_request) -> None:
     async def scenario() -> None:
         store = InMemoryAttributionStore()

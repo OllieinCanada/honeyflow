@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 
 import pytest
 
 from app.schemas.attribution import CreateManifestRequest
+
+os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://localhost/honeyflow_unit")
 
 
 @pytest.fixture

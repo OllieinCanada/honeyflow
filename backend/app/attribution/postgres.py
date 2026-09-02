@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.attribution.store import (
     AttributionConflictError,
+    AttributionIntegrityError,
     AttributionNotFoundError,
     ensure_manifest_integrity,
     ensure_overlay_integrity,
@@ -20,6 +21,61 @@ from app.models.attribution import (
     AttributionReviewOverlayRecord,
 )
 from app.schemas.attribution import AttributionManifest, ReviewOverlay
+
+
+def _manifest_from_record(
+    record: AttributionManifestRecord,
+    *,
+    expected_manifest_hash: str | None = None,
+    expected_source_key: str | None = None,
+) -> AttributionManifest:
+    """Validate JSON content against every content-addressed row binding."""
+    manifest = parse_manifest(record.manifest_json)
+    bindings_match = (
+        manifest.manifest_content_hash == record.manifest_content_hash
+        and manifest_source_key(manifest) == record.source_key
+        and manifest.content.project_identity == record.project_identity
+        and manifest.content.source_repository_url == record.source_repository_url
+        and manifest.content.source_commit_sha == record.source_commit_sha
+        and manifest.content.algorithm_version == record.algorithm_version
+        and (manifest.content.configuration_fingerprint == record.configuration_fingerprint)
+    )
+    if expected_manifest_hash is not None:
+        bindings_match = bindings_match and record.manifest_content_hash == expected_manifest_hash
+    if expected_source_key is not None:
+        bindings_match = bindings_match and record.source_key == expected_source_key
+    if not bindings_match:
+        raise AttributionIntegrityError(
+            "manifest_row_binding_error",
+            "stored attribution manifest does not match its row identity",
+        )
+    return manifest
+
+
+def _overlay_from_record(
+    record: AttributionReviewOverlayRecord,
+    *,
+    expected_overlay_hash: str | None = None,
+    expected_base_manifest_hash: str | None = None,
+) -> ReviewOverlay:
+    """Validate overlay JSON against its row key and manifest foreign key."""
+    overlay = parse_overlay(record.overlay_json)
+    bindings_match = (
+        overlay.overlay_hash == record.overlay_hash
+        and overlay.content.base_manifest_hash == record.manifest_content_hash
+    )
+    if expected_overlay_hash is not None:
+        bindings_match = bindings_match and record.overlay_hash == expected_overlay_hash
+    if expected_base_manifest_hash is not None:
+        bindings_match = (
+            bindings_match and record.manifest_content_hash == expected_base_manifest_hash
+        )
+    if not bindings_match:
+        raise AttributionIntegrityError(
+            "overlay_row_binding_error",
+            "stored attribution overlay does not match its row identity",
+        )
+    return overlay
 
 
 class PostgresAttributionStore:
@@ -56,12 +112,21 @@ class PostgresAttributionStore:
                     )
                 )
             ).scalar_one()
-            if stored.manifest_content_hash != manifest.manifest_content_hash:
+            stored_manifest = _manifest_from_record(
+                stored,
+                expected_source_key=source_key,
+            )
+            if inserted_hash is not None and inserted_hash != manifest.manifest_content_hash:
+                raise AttributionIntegrityError(
+                    "manifest_row_binding_error",
+                    "inserted attribution manifest returned an unexpected identity",
+                )
+            if stored_manifest.manifest_content_hash != manifest.manifest_content_hash:
                 raise AttributionConflictError(
                     "manifest_source_conflict",
                     "this source revision and configuration already have a different manifest",
                 )
-            return parse_manifest(stored.manifest_json), inserted_hash is not None
+            return stored_manifest, inserted_hash is not None
 
     async def get_manifest(self, manifest_hash: str) -> AttributionManifest:
         async with session_scope() as session:
@@ -77,7 +142,10 @@ class PostgresAttributionStore:
                     "manifest_not_found",
                     "attribution manifest was not found",
                 )
-            return parse_manifest(stored.manifest_json)
+            return _manifest_from_record(
+                stored,
+                expected_manifest_hash=manifest_hash,
+            )
 
     async def create_or_get_overlay(
         self,
@@ -103,7 +171,17 @@ class PostgresAttributionStore:
                     )
                 )
             ).scalar_one()
-            return parse_overlay(stored.overlay_json), inserted_hash is not None
+            stored_overlay = _overlay_from_record(
+                stored,
+                expected_overlay_hash=overlay.overlay_hash,
+                expected_base_manifest_hash=overlay.content.base_manifest_hash,
+            )
+            if inserted_hash is not None and inserted_hash != overlay.overlay_hash:
+                raise AttributionIntegrityError(
+                    "overlay_row_binding_error",
+                    "inserted attribution overlay returned an unexpected identity",
+                )
+            return stored_overlay, inserted_hash is not None
 
     async def get_overlay(self, overlay_hash: str) -> ReviewOverlay:
         async with session_scope() as session:
@@ -119,4 +197,7 @@ class PostgresAttributionStore:
                     "overlay_not_found",
                     "attribution review overlay was not found",
                 )
-            return parse_overlay(stored.overlay_json)
+            return _overlay_from_record(
+                stored,
+                expected_overlay_hash=overlay_hash,
+            )

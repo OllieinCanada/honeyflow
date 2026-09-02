@@ -239,6 +239,7 @@ class AttributionManifestContent(StrictModel):
     source_commit_sha: str
     dependency_references: list[DependencyReference]
     input_references: list[str]
+    input_evidence_fingerprint: Sha256Hex
     algorithm_version: Literal["deterministic-contribution-units/v1"] = ALGORITHM_VERSION
     attribution_configuration: AttributionConfiguration
     configuration_fingerprint: Sha256Hex
