@@ -1,4 +1,5 @@
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -8,7 +9,13 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.database import check_connection, close_engine
+from app.models.attribution import (  # noqa: F401 - register Alembic metadata
+    AttributionManifestRecord,
+    AttributionReviewOverlayRecord,
+)
+from app.models.badge import Badge  # noqa: F401 – ensure table is registered
 from app.routes import (
+    attribution,
     citation_graph,
     contributions,
     donations,
@@ -20,9 +27,8 @@ from app.routes import (
     users,
     vault,
 )
-from app.models.badge import Badge  # noqa: F401 – ensure table is registered
-from app.services.vault_db import init_db
 from app.services.donation_db import init_donations_db
+from app.services.vault_db import init_db
 from app.services.withdrawal_db import init_withdrawals_db
 
 
@@ -35,7 +41,7 @@ def _setup_logging() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize database connectivity on startup and close on shutdown."""
     log = logging.getLogger(__name__)
     log.info("Checking database connection...")
@@ -49,6 +55,7 @@ async def lifespan(app: FastAPI):
     log.info("Withdrawals table ready.")
     yield
     from app.services.screenshot import close_browser
+
     log.info("Closing Playwright browser...")
     await close_browser()
     log.info("Disposing database engine...")
@@ -77,6 +84,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(contributions.router)
+    app.include_router(attribution.router)
     app.include_router(donations.router)
     app.include_router(graph.router)
     app.include_router(citation_graph.router)
@@ -93,7 +101,7 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.get("/health")
-    async def health_check():
+    async def health_check() -> dict[str, str]:
         return {"status": "ok"}
 
     return app

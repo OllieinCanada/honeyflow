@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     app_name: str = "Contribution Tracer"
     debug: bool = False
     database_url: Optional[str] = None
+    attribution_admin_token: Optional[SecretStr] = None
 
     github_token: Optional[str] = None
     github_api_base: str = "https://api.github.com"
